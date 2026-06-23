@@ -21,6 +21,23 @@ function generateOTP() {
   return Math.floor(100000 + Math.random() * 900000).toString();
 }
 
+// ─── Health Check ─────────────────────────────────────────────
+app.get("/", (req, res) => {
+  res.status(200).json({ 
+    status: "OK",
+    message: "OTP Server is running 🚀",
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.get("/health", (req, res) => {
+  res.status(200).json({ 
+    status: "OK",
+    message: "OTP Server is running 🚀",
+    timestamp: new Date().toISOString()
+  });
+});
+
 // ─── Send OTP to Single User ─────────────────────────────────
 app.post("/send-otp", async (req, res) => {
   const { name, email } = req.body;
@@ -58,7 +75,6 @@ app.post("/send-otp", async (req, res) => {
 app.post("/send-otp-bulk", async (req, res) => {
   const { users } = req.body;
 
-  // users = [{ name: "Arshath", email: "arshath@example.com" }, ...]
   if (!users || !Array.isArray(users)) {
     return res.status(400).json({ success: false, message: "Users array is required" });
   }
@@ -94,13 +110,8 @@ app.post("/send-otp-bulk", async (req, res) => {
   res.json({ success: true, results });
 });
 
-// ─── Health Check ─────────────────────────────────────────────
-app.get("/", (req, res) => {
-  res.json({ message: "OTP Server is running 🚀" });
-});
-
 // ─── Start Server ─────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 Server running on http://0.0.0.0:${PORT}`);
 });
