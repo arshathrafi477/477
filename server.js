@@ -1,43 +1,56 @@
 // ═══════════════════════════════════════════════════════════════
 //  OTP Email Verification — server.js
 //  Stack   : Node.js + Express
-//  Email   : Maileroo SMTP (nodemailer)
-//  Storage : In-memory (no database)
+//  Email   : Maileroo HTTP API (no SMTP — works on Render)
+//  Storage : In-memory
 //
 //  Routes:
 //    POST /api/auth/send-otp    → send OTP to email
 //    POST /api/auth/verify-otp  → verify OTP
-//    GET  /health               → health check (GET only)
+//    GET  /health               → health check
 // ═══════════════════════════════════════════════════════════════
 
 require("dotenv").config();
-const express    = require("express");
-const cors       = require("cors");
-const nodemailer = require("nodemailer");
-const crypto     = require("crypto");
+
+const express = require("express");
+const cors    = require("cors");
+const crypto  = require("crypto");
 
 const app = express();
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 
 // ════════════════════════════════════════════════════════════════
-//  MAILEROO SMTP
+//  MAILEROO HTTP API
+//  Uses HTTPS (port 443) — never blocked by Render or any host.
+//  Get your API key: Maileroo dashboard → Domains → Sending Keys
 // ════════════════════════════════════════════════════════════════
 
-const transporter = nodemailer.createTransport({
-  host:   process.env.SMTP_HOST,
-  port:   Number(process.env.SMTP_PORT),
-  secure: process.env.SMTP_PORT === "465",
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
-});
+const MAILEROO_API = "https://smtp.maileroo.com/api/v2/send";
 
-transporter.verify((err) => {
-  if (err) console.error("❌ SMTP connection failed:", err.message);
-  else     console.log("✅ Maileroo SMTP ready");
-});
+async function sendEmail({ to, subject, html }) {
+  const res = await fetch(MAILEROO_API, {
+    method:  "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Api-Key":    process.env.MAILEROO_API_KEY,
+    },
+    body: JSON.stringify({
+      from:      `${process.env.FROM_NAME} <${process.env.FROM_EMAIL}>`,
+      to,
+      subject,
+      html,
+    }),
+  });
+
+  const data = await res.json();
+
+  if (!res.ok) {
+    throw new Error(data.message || `Maileroo API error ${res.status}`);
+  }
+
+  return data;
+}
 
 // ════════════════════════════════════════════════════════════════
 //  OTP STORE  →  { "email": { otp, expiresAt, sentAt } }
@@ -49,16 +62,14 @@ const otpStore = {};
 //  HELPERS
 // ════════════════════════════════════════════════════════════════
 
-// Strict email regex — rejects missing TLD, double dots, etc.
 const EMAIL_REGEX = /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/;
 
 function isValidEmail(email) {
   if (typeof email !== "string") return false;
-  const trimmed = email.trim();
-  if (trimmed.length > 254)       return false;   // RFC 5321 max
-  if (!EMAIL_REGEX.test(trimmed)) return false;
-  // Reject consecutive dots
-  if (trimmed.includes(".."))     return false;
+  const t = email.trim();
+  if (t.length > 254)       return false;
+  if (!EMAIL_REGEX.test(t)) return false;
+  if (t.includes(".."))     return false;
   return true;
 }
 
@@ -118,7 +129,6 @@ function buildEmailHTML(otp) {
 app.post("/api/auth/send-otp", async (req, res) => {
   const email = (req.body.email || "").trim().toLowerCase();
 
-  // 1. Validate email
   if (!email) {
     return res.status(400).json({ success: false, message: "Email is required." });
   }
@@ -126,7 +136,7 @@ app.post("/api/auth/send-otp", async (req, res) => {
     return res.status(400).json({ success: false, message: "Enter a valid email address." });
   }
 
-  // 2. Resend cooldown — 60 seconds
+  // 60-second resend cooldown
   const existing = otpStore[email];
   if (existing && Date.now() < existing.sentAt + 60_000) {
     const wait = Math.ceil((existing.sentAt + 60_000 - Date.now()) / 1000);
@@ -136,14 +146,12 @@ app.post("/api/auth/send-otp", async (req, res) => {
     });
   }
 
-  // 3. Generate OTP
   const otp       = generateOTP();
-  const expiresAt = Date.now() + 5 * 60_000; // 5 min
+  const expiresAt = Date.now() + 5 * 60_000;
 
-  // 4. Send email FIRST — only store if send succeeds
+  // Send email first — store only on success
   try {
-    await transporter.sendMail({
-      from:    `"${process.env.FROM_NAME}" <${process.env.FROM_EMAIL}>`,
+    await sendEmail({
       to:      email,
       subject: `${otp} — Your verification code (valid 5 min)`,
       html:    buildEmailHTML(otp),
@@ -156,8 +164,8 @@ app.post("/api/auth/send-otp", async (req, res) => {
     });
   }
 
-  // 5. Store only after successful send
   otpStore[email] = { otp, expiresAt, sentAt: Date.now() };
+  console.log(`✅ OTP sent to ${maskEmail(email)}`);
 
   const isDev = process.env.NODE_ENV !== "production";
 
@@ -165,7 +173,7 @@ app.post("/api/auth/send-otp", async (req, res) => {
     success: true,
     message: `OTP sent to ${maskEmail(email)}`,
     masked:  maskEmail(email),
-    ...(isDev && { demo_otp: otp }), // dev only — remove in production
+    ...(isDev && { demo_otp: otp }),
   });
 });
 
@@ -175,7 +183,6 @@ app.post("/api/auth/verify-otp", (req, res) => {
   const email = (req.body.email || "").trim().toLowerCase();
   const otp   = String(req.body.otp || "").trim();
 
-  // 1. Validate inputs
   if (!email || !otp) {
     return res.status(400).json({ success: false, message: "Email and OTP are required." });
   }
@@ -186,19 +193,15 @@ app.post("/api/auth/verify-otp", (req, res) => {
     return res.status(400).json({ success: false, message: "OTP must be a 6-digit number." });
   }
 
-  // 2. Look up store
   const record = otpStore[email];
   if (!record) {
     return res.status(400).json({ success: false, message: "No OTP found. Please request a new one." });
   }
-
-  // 3. Expiry check
   if (Date.now() > record.expiresAt) {
     delete otpStore[email];
     return res.status(400).json({ success: false, message: "OTP has expired. Please request a new one." });
   }
 
-  // 4. OTP match — use timing-safe compare to prevent brute-force timing attacks
   const expected = Buffer.from(record.otp);
   const received = Buffer.from(otp);
   const valid =
@@ -209,14 +212,14 @@ app.post("/api/auth/verify-otp", (req, res) => {
     return res.status(400).json({ success: false, message: "Incorrect OTP. Please try again." });
   }
 
-  // 5. Success — delete OTP so it can't be reused
   delete otpStore[email];
+  console.log(`✅ OTP verified for ${maskEmail(email)}`);
 
   return res.status(200).json({ success: true, message: "Email verified successfully!" });
 });
 
 
-// ── GET /health — reject all other methods ────────────────────
+// ── GET /health ───────────────────────────────────────────────
 app.get("/health", (_, res) => {
   res.status(200).json({ status: "ok", service: "OTP Verification API" });
 });
@@ -225,12 +228,10 @@ app.all("/health", (_, res) => {
   res.status(405).set("Allow", "GET").json({ success: false, message: "Method not allowed." });
 });
 
-
-// ── 404 for unknown routes ────────────────────────────────────
+// ── 404 ───────────────────────────────────────────────────────
 app.use((req, res) => {
   res.status(404).json({ success: false, message: `Route ${req.method} ${req.path} not found.` });
 });
-
 
 // ── Global error handler ──────────────────────────────────────
 app.use((err, req, res, _next) => {
@@ -238,12 +239,13 @@ app.use((err, req, res, _next) => {
   res.status(500).json({ success: false, message: "Internal server error." });
 });
 
-
 // ════════════════════════════════════════════════════════════════
 //  START
 // ════════════════════════════════════════════════════════════════
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Server running → http://localhost:${PORT}`);
-  console.log(`   Mode: ${process.env.NODE_ENV || "development"}`);
+  console.log(`   Mode : ${process.env.NODE_ENV || "development"}`);
+  console.log(`   From : ${process.env.FROM_NAME} <${process.env.FROM_EMAIL}>`);
+  console.log(`   API  : Maileroo HTTP API (no SMTP)`);
 });
