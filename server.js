@@ -1,10 +1,3 @@
-// ═══════════════════════════════════════════════════════════════
-//  OTP Email Verification — server.js
-//  Stack  : Node.js + Express
-//  Email  : Maileroo HTTP API v2
-//  Hosted : Render.com
-// ═══════════════════════════════════════════════════════════════
-
 require("dotenv").config();
 
 const express = require("express");
@@ -16,7 +9,6 @@ app.use(cors({ origin: "*" }));
 app.use(express.json());
 
 // Sanitize body — trim spaces from all keys and string values
-// Fixes issues like {" email": "..."} from some REST clients
 app.use((req, _, next) => {
   if (req.body && typeof req.body === "object") {
     const clean = {};
@@ -30,9 +22,6 @@ app.use((req, _, next) => {
 
 // ════════════════════════════════════════════════════════════════
 //  MAILEROO HTTP API v2
-//  Correct endpoint : POST https://smtp.maileroo.com/api/v2/emails
-//  Auth             : Authorization: Bearer YOUR_API_KEY
-//  Body             : { from: { address, display_name }, to: [{ address }], subject, html }
 // ════════════════════════════════════════════════════════════════
 
 async function sendEmail({ to, subject, html }) {
@@ -54,16 +43,14 @@ async function sendEmail({ to, subject, html }) {
   });
 
   const data = await response.json();
-
   if (!response.ok) {
     throw new Error(data.message || `Maileroo error: ${response.status}`);
   }
-
   return data;
 }
 
 // ════════════════════════════════════════════════════════════════
-//  OTP STORE  →  { "email": { otp, expiresAt, sentAt } }
+//  OTP STORE
 // ════════════════════════════════════════════════════════════════
 
 const otpStore = {};
@@ -124,33 +111,10 @@ function buildEmailHTML(otp) {
 }
 
 // ════════════════════════════════════════════════════════════════
-//  ROUTES
+//  CORE HANDLERS
 // ════════════════════════════════════════════════════════════════
 
-// ── GET / ─────────────────────────────────────────────────────
-app.get("/", (_, res) => {
-  res.status(200).json({
-    service:   "OTP Verification API",
-    status:    "running",
-    endpoints: {
-      sendOtp:   "POST /api/auth/send-otp",
-      verifyOtp: "POST /api/auth/verify-otp",
-      health:    "GET  /health",
-    },
-  });
-});
-
-// ── GET /health ───────────────────────────────────────────────
-app.get("/health", (_, res) => {
-  res.status(200).json({ status: "ok", service: "OTP Verification API" });
-});
-
-app.all("/health", (_, res) => {
-  res.status(405).set("Allow", "GET").json({ success: false, message: "Method not allowed." });
-});
-
-// ── POST /api/auth/send-otp ───────────────────────────────────
-app.post("/api/auth/send-otp", async (req, res) => {
+async function handleSendOtp(req, res) {
   const email = (req.body.email || "").trim().toLowerCase();
 
   if (!email) {
@@ -160,14 +124,10 @@ app.post("/api/auth/send-otp", async (req, res) => {
     return res.status(400).json({ success: false, message: "Enter a valid email address." });
   }
 
-  // 60 second resend cooldown
   const existing = otpStore[email];
   if (existing && Date.now() < existing.sentAt + 60_000) {
     const wait = Math.ceil((existing.sentAt + 60_000 - Date.now()) / 1000);
-    return res.status(429).json({
-      success: false,
-      message: `Please wait ${wait}s before requesting a new OTP.`,
-    });
+    return res.status(429).json({ success: false, message: `Please wait ${wait}s before requesting a new OTP.` });
   }
 
   const otp       = generateOTP();
@@ -181,27 +141,22 @@ app.post("/api/auth/send-otp", async (req, res) => {
     });
   } catch (err) {
     console.error("❌ Email send failed:", err.message);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to send OTP. Please try again.",
-    });
+    return res.status(500).json({ success: false, message: "Failed to send OTP. Please try again." });
   }
 
   otpStore[email] = { otp, expiresAt, sentAt: Date.now() };
   console.log(`✅ OTP sent → ${maskEmail(email)}`);
 
   const isDev = process.env.NODE_ENV !== "production";
-
   return res.status(200).json({
     success: true,
     message: `OTP sent to ${maskEmail(email)}`,
     masked:  maskEmail(email),
     ...(isDev && { demo_otp: otp }),
   });
-});
+}
 
-// ── POST /api/auth/verify-otp ─────────────────────────────────
-app.post("/api/auth/verify-otp", (req, res) => {
+function handleVerifyOtp(req, res) {
   const email = (req.body.email || "").trim().toLowerCase();
   const otp   = String(req.body.otp || "").trim();
 
@@ -226,9 +181,7 @@ app.post("/api/auth/verify-otp", (req, res) => {
 
   const expected = Buffer.from(record.otp);
   const received = Buffer.from(otp);
-  const valid =
-    expected.length === received.length &&
-    crypto.timingSafeEqual(expected, received);
+  const valid = expected.length === received.length && crypto.timingSafeEqual(expected, received);
 
   if (!valid) {
     return res.status(400).json({ success: false, message: "Incorrect OTP. Please try again." });
@@ -236,16 +189,48 @@ app.post("/api/auth/verify-otp", (req, res) => {
 
   delete otpStore[email];
   console.log(`✅ OTP verified → ${maskEmail(email)}`);
-
   return res.status(200).json({ success: true, message: "Email verified successfully!" });
-});
+}
 
-// ── 404 ───────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════
+//  ROUTES — all URL variations work
+// ════════════════════════════════════════════════════════════════
+
+// Health
+app.get("/health", (_, res) => res.status(200).json({ status: "ok", service: "OTP Verification API" }));
+app.all("/health", (_, res) => res.status(405).set("Allow", "GET").json({ success: false, message: "Method not allowed." }));
+
+// Root
+app.get("/", (_, res) => res.status(200).json({
+  service:   "OTP Verification API",
+  status:    "running",
+  endpoints: {
+    sendOtp:   "POST /api/auth/send-otp",
+    verifyOtp: "POST /api/auth/verify-otp",
+    health:    "GET  /health",
+  },
+}));
+
+// Send OTP — all URL variations
+app.post("/api/auth/send-otp", handleSendOtp);
+app.post("/api/send-otp",      handleSendOtp);
+app.post("/auth/send-otp",     handleSendOtp);
+app.post("/send-otp",          handleSendOtp);
+app.post("/send",              handleSendOtp);
+
+// Verify OTP — all URL variations
+app.post("/api/auth/verify-otp", handleVerifyOtp);
+app.post("/api/verify-otp",      handleVerifyOtp);
+app.post("/auth/verify-otp",     handleVerifyOtp);
+app.post("/verify-otp",          handleVerifyOtp);
+app.post("/verify",              handleVerifyOtp);
+
+// 404
 app.use((req, res) => {
   res.status(404).json({ success: false, message: `Route ${req.method} ${req.path} not found.` });
 });
 
-// ── Global error handler ──────────────────────────────────────
+// Global error handler
 app.use((err, req, res, _next) => {
   console.error("❌ Unhandled error:", err.message);
   res.status(500).json({ success: false, message: "Internal server error." });
