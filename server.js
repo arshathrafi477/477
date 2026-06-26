@@ -15,6 +15,19 @@ const app = express();
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 
+// Sanitize body — trim spaces from all keys and string values
+// Fixes issues like {" email": "..."} from some REST clients
+app.use((req, _, next) => {
+  if (req.body && typeof req.body === "object") {
+    const clean = {};
+    for (const [key, val] of Object.entries(req.body)) {
+      clean[key.trim()] = typeof val === "string" ? val.trim() : val;
+    }
+    req.body = clean;
+  }
+  next();
+});
+
 // ════════════════════════════════════════════════════════════════
 //  MAILEROO HTTP API v2
 //  Correct endpoint : POST https://smtp.maileroo.com/api/v2/emails
