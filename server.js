@@ -1,13 +1,8 @@
 // ═══════════════════════════════════════════════════════════════
 //  OTP Email Verification — server.js
-//  Stack   : Node.js + Express
-//  Email   : Maileroo HTTP API (no SMTP — works on Render)
-//  Storage : In-memory
-//
-//  Routes:
-//    POST /api/auth/send-otp    → send OTP to email
-//    POST /api/auth/verify-otp  → verify OTP
-//    GET  /health               → health check
+//  Stack  : Node.js + Express
+//  Email  : Maileroo HTTP API (MAILEROO_API_KEY)
+//  Hosted : Render.com
 // ═══════════════════════════════════════════════════════════════
 
 require("dotenv").config();
@@ -21,32 +16,28 @@ app.use(cors({ origin: "*" }));
 app.use(express.json());
 
 // ════════════════════════════════════════════════════════════════
-//  MAILEROO HTTP API
-//  Uses HTTPS (port 443) — never blocked by Render or any host.
-//  Get your API key: Maileroo dashboard → Domains → Sending Keys
+//  MAILEROO HTTP API  (uses MAILEROO_API_KEY from env)
 // ════════════════════════════════════════════════════════════════
 
-const MAILEROO_API = "https://smtp.maileroo.com/api/v2/send";
-
 async function sendEmail({ to, subject, html }) {
-  const res = await fetch(MAILEROO_API, {
+  const response = await fetch("https://smtp.maileroo.com/api/v2/send", {
     method:  "POST",
     headers: {
       "Content-Type": "application/json",
       "X-Api-Key":    process.env.MAILEROO_API_KEY,
     },
     body: JSON.stringify({
-      from:      `${process.env.FROM_NAME} <${process.env.FROM_EMAIL}>`,
+      from:    `${process.env.FROM_NAME} <${process.env.FROM_EMAIL}>`,
       to,
       subject,
       html,
     }),
   });
 
-  const data = await res.json();
+  const data = await response.json();
 
-  if (!res.ok) {
-    throw new Error(data.message || `Maileroo API error ${res.status}`);
+  if (!response.ok) {
+    throw new Error(data.message || `Maileroo error: ${response.status}`);
   }
 
   return data;
@@ -125,6 +116,28 @@ function buildEmailHTML(otp) {
 //  ROUTES
 // ════════════════════════════════════════════════════════════════
 
+// ── GET / ─────────────────────────────────────────────────────
+app.get("/", (_, res) => {
+  res.status(200).json({
+    service:   "OTP Verification API",
+    status:    "running",
+    endpoints: {
+      sendOtp:   "POST /api/auth/send-otp",
+      verifyOtp: "POST /api/auth/verify-otp",
+      health:    "GET  /health",
+    },
+  });
+});
+
+// ── GET /health ───────────────────────────────────────────────
+app.get("/health", (_, res) => {
+  res.status(200).json({ status: "ok", service: "OTP Verification API" });
+});
+
+app.all("/health", (_, res) => {
+  res.status(405).set("Allow", "GET").json({ success: false, message: "Method not allowed." });
+});
+
 // ── POST /api/auth/send-otp ───────────────────────────────────
 app.post("/api/auth/send-otp", async (req, res) => {
   const email = (req.body.email || "").trim().toLowerCase();
@@ -136,7 +149,7 @@ app.post("/api/auth/send-otp", async (req, res) => {
     return res.status(400).json({ success: false, message: "Enter a valid email address." });
   }
 
-  // 60-second resend cooldown
+  // 60 second resend cooldown
   const existing = otpStore[email];
   if (existing && Date.now() < existing.sentAt + 60_000) {
     const wait = Math.ceil((existing.sentAt + 60_000 - Date.now()) / 1000);
@@ -149,7 +162,6 @@ app.post("/api/auth/send-otp", async (req, res) => {
   const otp       = generateOTP();
   const expiresAt = Date.now() + 5 * 60_000;
 
-  // Send email first — store only on success
   try {
     await sendEmail({
       to:      email,
@@ -165,7 +177,7 @@ app.post("/api/auth/send-otp", async (req, res) => {
   }
 
   otpStore[email] = { otp, expiresAt, sentAt: Date.now() };
-  console.log(`✅ OTP sent to ${maskEmail(email)}`);
+  console.log(`✅ OTP sent → ${maskEmail(email)}`);
 
   const isDev = process.env.NODE_ENV !== "production";
 
@@ -176,7 +188,6 @@ app.post("/api/auth/send-otp", async (req, res) => {
     ...(isDev && { demo_otp: otp }),
   });
 });
-
 
 // ── POST /api/auth/verify-otp ─────────────────────────────────
 app.post("/api/auth/verify-otp", (req, res) => {
@@ -213,19 +224,9 @@ app.post("/api/auth/verify-otp", (req, res) => {
   }
 
   delete otpStore[email];
-  console.log(`✅ OTP verified for ${maskEmail(email)}`);
+  console.log(`✅ OTP verified → ${maskEmail(email)}`);
 
   return res.status(200).json({ success: true, message: "Email verified successfully!" });
-});
-
-
-// ── GET /health ───────────────────────────────────────────────
-app.get("/health", (_, res) => {
-  res.status(200).json({ status: "ok", service: "OTP Verification API" });
-});
-
-app.all("/health", (_, res) => {
-  res.status(405).set("Allow", "GET").json({ success: false, message: "Method not allowed." });
 });
 
 // ── 404 ───────────────────────────────────────────────────────
